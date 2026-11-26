@@ -1,225 +1,177 @@
-// Local test for the pass gate. Run: node test.mjs
-// Signatures here are real: made with throwaway keys by a second, independent path
-// (the JSON string the gate hands out is parsed and signed as a wallet would).
-import assert from 'node:assert/strict';
-import { Wallet, TypedDataEncoder } from 'ethers';
-import { handler } from './index.mjs';
+// Checks for the pass gate. The chain and the MCP server are stand-ins, except the last two checks,
+// which read the real pass contract on BNB Smart Chain (read only).
+//   node test.mjs              all 32 checks
+//   OFFLINE=1 node test.mjs    the 30 checks that need no network
+import { handler, hasActivePass, forgetAll } from './index.mjs';
 
-const realFetch = globalThis.fetch;
-const CONTRACT = '0xF1a5000000000000000000000000000000000001';
-const TOKEN = 'fp_local_test_token';
+const CONTRACT = '0x61c712e373149cab2de86ed2aadacc568db91acb';
+const HOLDER = '0x39217795fdbaceb25e62710d006ae68e30b5a3b1';
+const NOBODY = '0x000000000000000000000000000000000000dead';
+const TOKEN = 'test-lane-token-0123456789abcdef0123456789';
+const UPSTREAM = 'https://mcp.test/mcp';
+const RPC = 'https://rpc.test';
 const WORD = (n) => '0x' + n.toString(16).padStart(64, '0');
-const holder = Wallet.createRandom();
-const other = Wallet.createRandom();
-
-let calls = [];
-let passHolders = new Set([holder.address.toLowerCase()]);
-let nodeDown = false;
-globalThis.fetch = async (url, init) => {
-  const body = JSON.parse(init.body);
-  calls.push(String(url));
-  if (nodeDown) throw new Error('down');
-  const asked = '0x' + body.params[0].data.slice(-40);
-  return new Response(JSON.stringify({ result: WORD(passHolders.has(asked) ? 1 : 0) }), { status: 200 });
-};
-
-const get = (address) => ({ requestContext: { http: { method: 'GET' } }, queryStringParameters: address === undefined ? undefined : { address } });
-const post = (obj) => ({ requestContext: { http: { method: 'POST' } }, body: typeof obj === 'string' ? obj : JSON.stringify(obj) });
-const read = async (event) => { const r = await handler(event); return { status: r.statusCode, body: JSON.parse(r.body), raw: r.body }; };
-
-/** Signs exactly what the gate handed out, the way a wallet would: from the JSON string. */
-async function signAsWallet(signRequest, wallet) {
-  const req = JSON.parse(signRequest);
-  assert.equal(req.method, 'eth_signTypedData_v4');
-  const typed = JSON.parse(req.params[1]);
-  const { EIP712Domain, ...types } = typed.types;
-  assert.ok(Array.isArray(EIP712Domain));
-  assert.equal(TypedDataEncoder.getPrimaryType(types), typed.primaryType);
-  return { signer: req.params[0], typed, signature: await wallet.signTypedData(typed.domain, types, typed.message) };
-}
 
 let passed = 0;
-const check = async (name, fn) => { calls = []; nodeDown = false; await fn(); passed += 1; console.log('PASS |', name); };
+let failed = 0;
+const check = (name, ok, detail = '') => {
+  if (ok) { passed += 1; console.log('PASS | ' + name); }
+  else { failed += 1; console.log('FAIL | ' + name + (detail ? ' | ' + detail : '')); }
+};
 
-process.env.PASS_CONTRACT = CONTRACT;
-process.env.MCP_PASS_TOKEN = TOKEN;
+const realFetch = globalThis.fetch;
+let chain = 'ok';          // ok | down
+let upstreamMode = 'ok';   // ok | down | redirect | error
+let seen = [];             // requests the gate sent to the MCP server
+let rpcCalls = 0;
 
-let step1;
-await check('step 1: a wallet with a pass gets a sign request and no token', async () => {
-  step1 = await read(get(holder.address));
-  assert.equal(step1.status, 200);
-  assert.equal(step1.body.pass, true);
-  assert.ok(!step1.raw.includes(TOKEN));
-  assert.equal(step1.body.mcp, undefined);
-  const { signer, typed } = await signAsWallet(step1.body.signRequest, holder);
-  assert.equal(signer, holder.address.toLowerCase());
-  assert.equal(typed.message.wallet, holder.address.toLowerCase());
-  assert.equal(typed.message.expires, step1.body.expires);
-  assert.equal(typed.domain.chainId, 56);
-  assert.equal(typed.domain.verifyingContract, CONTRACT.toLowerCase());
-});
-
-let good;
-await check('step 2: the wallet signs and gets the lane token', async () => {
-  good = await signAsWallet(step1.body.signRequest, holder);
-  const r = await read(post({ address: holder.address, expires: step1.body.expires, signature: good.signature }));
-  assert.equal(r.status, 200);
-  assert.deepEqual(r.body, { pass: true, mcp: { url: 'https://api.flash.im/mcp', header: 'Authorization', value: `Bearer ${TOKEN}` } });
-});
-
-await check('an address alone never returns the token', async () => {
-  const a = await read(get(holder.address));
-  const b = await read(post({ address: holder.address }));
-  assert.ok(!a.raw.includes(TOKEN));
-  assert.equal(b.status, 400);
-  assert.ok(!b.raw.includes(TOKEN));
-});
-
-await check('someone else signing for the holder address is refused', async () => {
-  const forged = await signAsWallet(step1.body.signRequest, other);
-  const r = await read(post({ address: holder.address, expires: step1.body.expires, signature: forged.signature }));
-  assert.equal(r.status, 401);
-  assert.ok(!r.raw.includes(TOKEN));
-  assert.equal(calls.length, 0); // refused before the chain is read
-});
-
-await check('a holder signature reused for another address is refused', async () => {
-  const r = await read(post({ address: other.address, expires: step1.body.expires, signature: good.signature }));
-  assert.equal(r.status, 401);
-});
-
-await check('a signature with a changed expires is refused', async () => {
-  const r = await read(post({ address: holder.address, expires: step1.body.expires - 1, signature: good.signature }));
-  assert.equal(r.status, 401);
-});
-
-await check('a signature made 6 days ago for the full window is still accepted, and the chain is read again', async () => {
-  const exp = Math.floor(Date.now() / 1000) + 86400; // issued 6 days ago with a 7-day window
-  const sig = await holder.signTypedData(good.typed.domain, { PassCheck: good.typed.types.PassCheck }, { ...good.typed.message, expires: exp });
-  const r = await read(post({ address: holder.address, expires: exp, signature: sig }));
-  assert.equal(r.status, 200);
-  assert.equal(r.body.pass, true);
-  assert.equal(calls.length, 1);
-});
-
-await check('an expired signature is refused', async () => {
-  const past = Math.floor(Date.now() / 1000) - 5;
-  const sig = await holder.signTypedData(good.typed.domain, { PassCheck: good.typed.types.PassCheck }, { ...good.typed.message, expires: past });
-  const r = await read(post({ address: holder.address, expires: past, signature: sig }));
-  assert.equal(r.status, 401);
-  assert.match(r.body.error, /expired/);
-});
-
-await check('a signature dated far ahead is refused (cannot be made long-lived)', async () => {
-  const far = Math.floor(Date.now() / 1000) + 8 * 86400; // the window is 7 days
-  const sig = await holder.signTypedData(good.typed.domain, { PassCheck: good.typed.types.PassCheck }, { ...good.typed.message, expires: far });
-  const r = await read(post({ address: holder.address, expires: far, signature: sig }));
-  assert.equal(r.status, 400);
-  assert.ok(!r.raw.includes(TOKEN));
-});
-
-await check('a signature for another contract (another domain) is refused', async () => {
-  const sig = await holder.signTypedData({ ...good.typed.domain, verifyingContract: '0x' + '9'.repeat(40) }, { PassCheck: good.typed.types.PassCheck }, good.typed.message);
-  const r = await read(post({ address: holder.address, expires: step1.body.expires, signature: sig }));
-  assert.equal(r.status, 401);
-});
-
-await check('a signature for another purpose text is refused', async () => {
-  const sig = await holder.signTypedData(good.typed.domain, { PassCheck: good.typed.types.PassCheck }, { ...good.typed.message, purpose: 'Something else' });
-  const r = await read(post({ address: holder.address, expires: step1.body.expires, signature: sig }));
-  assert.equal(r.status, 401);
-});
-
-await check('a valid signature from a wallet without a pass gets no token', async () => {
-  const exp = Math.floor(Date.now() / 1000) + 300;
-  const sig = await other.signTypedData(good.typed.domain, { PassCheck: good.typed.types.PassCheck }, { wallet: other.address.toLowerCase(), purpose: good.typed.message.purpose, expires: exp });
-  const r = await read(post({ address: other.address, expires: exp, signature: sig }));
-  assert.equal(r.status, 200);
-  assert.equal(r.body.pass, false);
-  assert.ok(!r.raw.includes(TOKEN));
-});
-
-await check('the pass is checked again at step 2 (pass gone after signing: no token)', async () => {
-  passHolders = new Set();
-  const r = await read(post({ address: holder.address, expires: step1.body.expires, signature: good.signature }));
-  assert.equal(r.body.pass, false);
-  assert.ok(!r.raw.includes(TOKEN));
-  passHolders = new Set([holder.address.toLowerCase()]);
-});
-
-await check('the address in any letter case works with the same signature', async () => {
-  assert.equal((await read(post({ address: holder.address.toUpperCase().replace('0X', '0x'), expires: step1.body.expires, signature: good.signature }))).body.pass, true);
-  const r = await read(post({ address: holder.address.toLowerCase(), expires: step1.body.expires, signature: good.signature }));
-  assert.equal(r.body.pass, true);
-});
-
-await check('the signature in the shape the Agentic Wallet returns (r+s without 0x, recovery apart) works', async () => {
-  const raw = good.signature.slice(2);
-  const rs = raw.slice(0, 128);
-  const v = raw.slice(128); // 1b or 1c
-  const parity = v === '1b' ? '00' : '01';
-  for (const [signature, signatureRecovery] of [[rs, parity], [rs.toUpperCase(), parity], ['0x' + rs, v], [raw, undefined]]) {
-    const r = await read(post({ address: holder.address, expires: step1.body.expires, signature, signatureRecovery }));
-    assert.equal(r.status, 200);
-    assert.equal(r.body.pass, true);
+globalThis.fetch = async (url, init = {}) => {
+  if (String(url).startsWith(RPC)) {
+    rpcCalls += 1;
+    if (chain === 'down') throw new Error('down');
+    const data = JSON.parse(init.body).params[0].data;
+    const wallet = '0x' + data.slice(-40);
+    return new Response(JSON.stringify({ jsonrpc: '2.0', id: 1, result: WORD(wallet === HOLDER ? 1 : 0) }));
   }
-  // the wrong recovery value must not pass
-  const wrong = await read(post({ address: holder.address, expires: step1.body.expires, signature: rs, signatureRecovery: parity === '00' ? '01' : '00' }));
-  assert.equal(wrong.status, 401);
-  // r+s alone, or a recovery value that is not one, is malformed
-  assert.equal((await read(post({ address: holder.address, expires: step1.body.expires, signature: rs }))).status, 400);
-  assert.equal((await read(post({ address: holder.address, expires: step1.body.expires, signature: rs, signatureRecovery: '05' }))).status, 400);
-});
+  if (String(url) === UPSTREAM) {
+    seen.push({ headers: { ...init.headers }, body: init.body, method: init.method });
+    if (upstreamMode === 'down') throw new Error('down');
+    if (upstreamMode === 'redirect') return new Response('', { status: 302, headers: { location: 'https://elsewhere.test/' } });
+    if (upstreamMode === 'error') return new Response(JSON.stringify({ jsonrpc: '2.0', id: 1, error: { code: -32601, message: 'Method not found' } }), { status: 404, headers: { 'content-type': 'application/json' } });
+    return new Response(JSON.stringify({ jsonrpc: '2.0', id: 1, result: { content: [{ type: 'text', text: '{"items":[1,2,3]}' }] } }), { status: 200, headers: { 'content-type': 'application/json' } });
+  }
+  throw new Error('unexpected fetch ' + url);
+};
 
-await check('step 1 for a wallet without a pass: no sign request', async () => {
-  const r = await read(get(other.address));
-  assert.equal(r.body.pass, false);
-  assert.equal(r.body.signRequest, undefined);
+const env = (over = {}) => {
+  for (const k of ['PASS_CONTRACT', 'MCP_PASS_TOKEN', 'BSC_RPC_URLS', 'MCP_UPSTREAM_URL']) delete process.env[k];
+  Object.assign(process.env, { PASS_CONTRACT: CONTRACT, MCP_PASS_TOKEN: TOKEN, BSC_RPC_URLS: RPC, MCP_UPSTREAM_URL: UPSTREAM }, over);
+  for (const [k, v] of Object.entries(over)) if (v === undefined) delete process.env[k];
+};
+const reset = () => { forgetAll(); chain = 'ok'; upstreamMode = 'ok'; seen = []; rpcCalls = 0; env(); };
+const CALL = JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'get_top_news', arguments: { category: 'crypto' } } });
+const post = (query = {}, headers = {}, body = CALL, extra = {}) => handler({
+  requestContext: { http: { method: 'POST' } },
+  queryStringParameters: query,
+  headers: { 'Content-Type': 'application/json', Accept: 'application/json, text/event-stream', ...headers },
+  body, ...extra,
 });
+const get = (query = {}) => handler({ requestContext: { http: { method: 'GET' } }, queryStringParameters: query, headers: {} });
+const sentToken = () => seen.length > 0 && seen[seen.length - 1].headers.authorization === 'Bearer ' + TOKEN;
+const noToken = () => seen.length > 0 && !('authorization' in seen[seen.length - 1].headers);
+const leaks = (r) => JSON.stringify(r).includes(TOKEN);
 
-for (const [name, event, status] of [
-  ['GET without address', get(undefined), 400],
-  ['GET with a name', get('someone.ai'), 400],
-  ['POST that is not JSON', post('address=x'), 400],
-  ['POST with a malformed signature', post({ address: holder.address, expires: 1, signature: '0x1234' }), 400],
-  ['POST with a non-number expires', post({ address: holder.address, expires: 'soon', signature: '0x' + 'a'.repeat(130) }), 400],
-  ['POST with a well-formed but meaningless signature', post({ address: holder.address, expires: Math.floor(Date.now() / 1000) + 60, signature: '0x' + 'a'.repeat(130) }), 401],
-  ['DELETE', { requestContext: { http: { method: 'DELETE' } } }, 405],
-]) {
-  await check(`bad input is refused without reading the chain (${name})`, async () => {
-    const r = await read(event);
-    assert.equal(r.status, status);
-    assert.equal(calls.length, 0);
-    assert.ok(!r.raw.includes(TOKEN));
-  });
+// ---------------------------------------------------------------- lanes
+reset();
+let r = await post({ wallet: HOLDER });
+check('holder: goes on with the lane token', r.statusCode === 200 && sentToken());
+check('holder: lane headers say pass', r.headers['X-Flash-Lane'] === 'pass' && r.headers['X-Flash-Lane-Reason'] === 'pass');
+check('holder: MCP answer is returned as it is', JSON.parse(r.body).result.content[0].text === '{"items":[1,2,3]}');
+check('holder: the token is not in the response', !leaks(r));
+check('holder: the call body is passed on unchanged', seen[0].body === CALL && seen[0].method === 'POST');
+check('holder: content-type and accept are passed on', seen[0].headers['content-type'] === 'application/json' && /event-stream/.test(seen[0].headers.accept));
+
+reset();
+r = await post({ wallet: NOBODY });
+check('no pass: goes on without a token (public lane)', r.statusCode === 200 && noToken() && r.headers['X-Flash-Lane'] === 'public' && r.headers['X-Flash-Lane-Reason'] === 'no-pass');
+
+reset();
+r = await post({});
+check('no wallet: public lane, the chain is not read', r.statusCode === 200 && noToken() && r.headers['X-Flash-Lane-Reason'] === 'no-wallet' && rpcCalls === 0);
+
+reset();
+r = await post({ wallet: '0x1234' });
+check('malformed wallet: public lane', r.statusCode === 200 && noToken() && r.headers['X-Flash-Lane-Reason'] === 'no-wallet');
+
+reset();
+r = await post({}, { 'X-Flash-Wallet': HOLDER });
+check('wallet in the header works too', sentToken() && r.headers['X-Flash-Lane'] === 'pass');
+
+reset();
+r = await post({ wallet: HOLDER.toUpperCase().replace('0X', '0x') });
+check('wallet in upper case: same outcome', sentToken() && r.headers['X-Flash-Lane'] === 'pass');
+
+reset();
+chain = 'down';
+r = await post({ wallet: HOLDER });
+check('chain cannot be read: public lane, still answered', r.statusCode === 200 && noToken() && r.headers['X-Flash-Lane-Reason'] === 'chain-unavailable');
+chain = 'ok';
+r = await post({ wallet: HOLDER });
+check('chain back: a failed read was not remembered', sentToken());
+
+// ---------------------------------------------------------------- what the caller cannot do
+reset();
+r = await post({ wallet: NOBODY }, { Authorization: 'Bearer ' + TOKEN });
+check('a caller-sent Authorization header is not passed on', noToken() && r.headers['X-Flash-Lane'] === 'public');
+
+reset();
+r = await post({ wallet: NOBODY }, { Authorization: 'Bearer something-else', Cookie: 'a=b', 'X-Forwarded-For': '1.2.3.4' });
+check('only the four listed headers are passed on', Object.keys(seen[0].headers).sort().join() === 'accept,content-type');
+
+// ---------------------------------------------------------------- remembering
+reset();
+await post({ wallet: HOLDER }); await post({ wallet: HOLDER }); await post({ wallet: HOLDER });
+check('three calls from a holder read the chain once', rpcCalls === 1 && seen.length === 3);
+
+// ---------------------------------------------------------------- settings
+reset(); env({ MCP_PASS_TOKEN: undefined });
+r = await post({ wallet: HOLDER });
+check('no token configured: public lane, still answered', r.statusCode === 200 && noToken() && r.headers['X-Flash-Lane-Reason'] === 'gate-not-configured');
+
+reset(); env({ PASS_CONTRACT: 'not-an-address' });
+r = await post({ wallet: HOLDER });
+check('no contract configured: public lane, still answered', r.statusCode === 200 && noToken());
+
+// ---------------------------------------------------------------- MCP server trouble
+reset(); upstreamMode = 'down';
+r = await post({ wallet: HOLDER });
+check('MCP server does not answer: 502, no token in the answer', r.statusCode === 502 && !leaks(r) && r.headers['X-Flash-Lane'] === 'pass');
+
+reset(); upstreamMode = 'redirect';
+r = await post({ wallet: HOLDER });
+check('MCP server redirects: not followed, 502', r.statusCode === 502 && seen.length === 1 && !leaks(r));
+
+reset(); upstreamMode = 'error';
+r = await post({ wallet: HOLDER });
+check('MCP server error: status and body returned as they are', r.statusCode === 404 && JSON.parse(r.body).error.code === -32601);
+
+// ---------------------------------------------------------------- shape of requests
+reset();
+r = await post({ wallet: HOLDER }, {}, Buffer.from(CALL).toString('base64'), { isBase64Encoded: true });
+check('base64 body is decoded before it is passed on', seen[0].body === CALL);
+
+reset();
+r = await post({ wallet: HOLDER }, {}, 'x'.repeat(100 * 1024 + 1));
+check('oversized body: 413, nothing sent', r.statusCode === 413 && seen.length === 0);
+
+reset();
+r = await handler({ requestContext: { http: { method: 'OPTIONS' } }, headers: {} });
+check('OPTIONS: 204 with CORS headers', r.statusCode === 204 && r.headers['Access-Control-Allow-Origin'] === '*');
+r = await handler({ requestContext: { http: { method: 'DELETE' } }, headers: {} });
+check('other methods: 405', r.statusCode === 405);
+
+// ---------------------------------------------------------------- GET: does this wallet have a pass?
+reset();
+r = await get({ address: HOLDER });
+check('GET holder: pass true, no token, nothing sent to the MCP server', r.statusCode === 200 && JSON.parse(r.body).pass === true && !leaks(r) && seen.length === 0);
+r = await get({ address: NOBODY });
+check('GET no pass: pass false', r.statusCode === 200 && JSON.parse(r.body).pass === false);
+r = await get({});
+check('GET without an address: 400', r.statusCode === 400);
+chain = 'down';
+r = await get({ address: HOLDER });
+check('GET when the chain cannot be read: 503', r.statusCode === 503);
+reset(); env({ PASS_CONTRACT: undefined });
+r = await get({ address: HOLDER });
+check('GET with no contract configured: 503', r.statusCode === 503);
+
+// ---------------------------------------------------------------- real chain (read only)
+if (process.env.OFFLINE !== '1') {
+  globalThis.fetch = realFetch;
+  const nodes = ['https://bsc-dataseed.bnbchain.org', 'https://bsc-rpc.publicnode.com'];
+  check('REAL CHAIN: the first pass holder is active', (await hasActivePass(nodes, CONTRACT, HOLDER)) === true);
+  check('REAL CHAIN: an address with no pass is not active', (await hasActivePass(nodes, CONTRACT, NOBODY)) === false);
 }
 
-await check('chain unreadable: 503 at both steps, no token', async () => {
-  nodeDown = true;
-  assert.equal((await read(get(holder.address))).status, 503);
-  nodeDown = true;
-  const r = await read(post({ address: holder.address, expires: step1.body.expires, signature: good.signature }));
-  assert.equal(r.status, 503);
-  assert.ok(!r.raw.includes(TOKEN));
-});
-
-for (const [name, setup] of [
-  ['no contract address', () => { delete process.env.PASS_CONTRACT; }],
-  ['no token', () => { process.env.PASS_CONTRACT = CONTRACT; delete process.env.MCP_PASS_TOKEN; }],
-]) {
-  await check(`not configured: closed at both steps (${name})`, async () => {
-    setup();
-    assert.equal((await read(get(holder.address))).status, 503);
-    assert.equal((await read(post({ address: holder.address, expires: step1.body.expires, signature: good.signature }))).status, 503);
-    assert.equal(calls.length, 0);
-  });
-}
-process.env.PASS_CONTRACT = CONTRACT;
-process.env.MCP_PASS_TOKEN = TOKEN;
-
-globalThis.fetch = realFetch;
-await check('REAL CHAIN: nothing deployed at the contract address gives 503', async () => {
-  assert.equal((await read(get(holder.address))).status, 503);
-});
-
-console.log(`\n${passed} checks passed`);
+console.log(`\n${passed} checks passed` + (failed ? `, ${failed} FAILED` : ''));
+process.exitCode = failed ? 1 : 0;

@@ -10,18 +10,19 @@ An Agent ID (`name.ai`) is the on-chain identity of a Binance Agentic Wallet. FL
 | Pass contract (BNB Smart Chain) | [`0x61c712e373149cab2de86ed2aadacc568db91acb`](https://bscscan.com/address/0x61c712e373149cab2de86ed2aadacc568db91acb#code) |
 | Source verification | BscScan, exact match |
 | Agent ID contract (dependency) | `0x60b9262456de011f7d15a54cdd8c48baaa8b022f` |
-| FLASH MCP server | `https://api.flash.im/mcp` |
+| FLASH MCP server, pass lane | `https://agentic.flash.im/mcp?wallet=<wallet address>` |
+| FLASH MCP server, public lane | `https://api.flash.im/mcp` |
 | Cost | The network fee of one transaction. FLASH charges nothing. |
 
 ## What this gives Agent ID
 
 - **A use for Agent ID outside the chain.** The identity is not a badge here. It decides which lane an agent's calls travel in, on a news service that is already in production.
-- **Better service for identified agents.** One Agent ID per user, not transferable, means the pass lane is shared only among real agent owners. It cannot be filled with throwaway wallets, so its limit stays useful to the agents it was made for.
+- **Better service for identified agents.** One Agent ID per user, not transferable, means passes cannot be multiplied with throwaway wallets. The pass lane has its own key and its own limit, apart from the public lane, so the public lane's traffic does not use it up.
 - **News for the prediction markets agents trade.** An agent sends a Polymarket or Kalshi contract and gets the stories that bear on that question, each marked by how directly. In FLASH's measurement this answered more contracts, with fewer unrelated stories, than Google's search engine set over the same stories (table below).
 - **Cheaper, faster, repeatable answers for agents in the ecosystem.** In FLASH's own measurement, an agent answered "what matters today" about 12 times cheaper and 13 times faster with one FLASH call than with web search, and gave the same answer each time (table below).
 - **News in the user's own language, in 16 languages.** Every story is served already translated, with the same values in every language. An agent whose user reads Korean, Turkish, or Vietnamese passes the story on as it arrives and spends no tokens translating it.
 - **A reason to run an agent every day.** News is a daily need. The pass lane is tuned for scheduled work, which is the kind of work that keeps an Agentic Wallet's agent in use.
-- **The whole flow runs on the Agentic Wallet.** Claiming the pass and proving the wallet are done by the user's agent, in Binance AI Pro on a phone or with the Binance Agentic Wallet skill, with a preview and the user's confirmation at each step.
+- **The whole flow runs on the Agentic Wallet.** Claiming the pass is done by the user's agent, in Binance AI Pro on a phone or with the Binance Agentic Wallet skill, with a preview and the user's confirmation. Reading the news after that takes no wallet action at all: no signature and no transaction.
 
 ## What an agent can build on the pass lane
 
@@ -143,7 +144,7 @@ An agent that translates each story itself pays for it in tokens on every story 
 | On-chain identity of an Agentic Wallet | **Access control.** `claim()` checks `AgentID.balanceOf(msg.sender) > 0` in the contract. A wallet without an Agent ID cannot get a pass. |
 | One per user, not transferable | **One pass per wallet.** The pass is a record for the wallet that asked. It cannot be moved, bought, or sold. |
 | Built for AI agents | **Claimed and used by an agent.** The user's agent prepares the claim, the user confirms it, and the same agent then reads the news through the pass lane. |
-| Still held, or not | **A live check.** `isActive(wallet)` is true only while the wallet still holds its Agent ID. The gate reads it every time it hands out the lane header. |
+| Still held, or not | **A live check.** `isActive(wallet)` is true only while the wallet still holds its Agent ID. The gate reads it when a call arrives and keeps the answer for a few minutes, so a wallet that gives up its Agent ID leaves the pass lane. |
 
 ## Get the pass
 
@@ -157,7 +158,7 @@ Nothing to install. The same two prompts are on https://agentic.flash.im with a 
 On BNB Smart Chain, call the FLASH Agent Pass contract 0x61c712e373149cab2de86ed2aadacc568db91acb from my Agentic Wallet with value 0 and input data 0x4e71d92d. This claims my FLASH Agent Pass. Show me the preview first and send it only after I confirm.
 ```
 
-If AI Pro asks you to turn on Developer Mode before sending a contract call, follow its prompt. Check the preview before you confirm: the call goes to the pass contract above, the value is 0, and there is no balance change, no allowance change, and no authority change. If the preview shows anything else, do not confirm.
+If AI Pro asks you to sign in to your Agentic Wallet, or to turn on Developer Mode before sending a contract call, follow its prompt. Check the preview before you confirm: the call goes to the pass contract above, the value is 0, and there is no balance change, no allowance change, and no authority change. If the preview shows anything else, do not confirm.
 
 If the preview fails with `FlashPass: this wallet already has a pass`, the wallet has its pass. Nothing was sent.
 
@@ -165,21 +166,27 @@ If the preview fails with `FlashPass: this wallet already has a pass`, the walle
 
 Install the skill in [`skill/flash-pass`](skill/flash-pass/SKILL.md). It uses the `baw` command from the Binance Agentic Wallet skill, previews every action, and sends nothing until the user confirms.
 
-## Get the lane header
+## Read on the pass lane
 
-A wallet address is public, so holding a pass is not enough to get the lane header: the wallet signs a short message to show that the caller controls it. Signing sends no transaction, costs nothing, and grants no permission over the wallet or any token. The signature is good for 7 days and only at the pass gate, and each time it is used the gate reads the chain again.
+No signature and no transaction. An agent sends its MCP calls to the pass gate instead of the public address, together with the wallet address:
+
+```
+https://agentic.flash.im/mcp?wallet=<wallet address>
+```
+
+The gate reads the pass contract on BNB Smart Chain. A wallet that holds a pass reads on the pass lane. Any other call (no pass, no address, or the chain cannot be read) goes on to the same server on the public lane, so nothing is refused. The tools, arguments, and results are the same as on `https://api.flash.im/mcp`. Every answer carries two headers that say which lane the call took: `X-Flash-Lane` (`pass` or `public`) and `X-Flash-Lane-Reason`.
 
 With Binance AI Pro, paste:
 
 ```
-Fetch https://agentic.flash.im/gate?address=<my Agentic Wallet address on BNB Smart Chain>. I ask you to sign the signRequest it returns with my Agentic Wallet: preview the EIP-712 message first and show it to me. After I confirm, sign it and POST {address, expires, signature, signatureRecovery} as JSON to the same URL, with signature and signatureRecovery exactly as the wallet returned them. Then use that FLASH MCP server with the header it gives, and tell me today's top 3 crypto news stories in the order it returns them, each with its source and impact. Do not show the header value.
+Read my Agentic Wallet address on BNB Smart Chain. Then use the FLASH news MCP server at https://agentic.flash.im/mcp with ?wallet= followed by that address, and tell me today's top 3 crypto news stories in the order it returns them, each with its source and impact. Also tell me which lane the call took, from the X-Flash-Lane response header.
 ```
 
-The message you sign has three fields and nothing else: your wallet address, the purpose `Get the FLASH Agent Pass lane token`, and an expiry time. The gate answers with the MCP server URL and one header. The last part of the prompt uses that header at once, in plain words: the agent calls the MCP server itself (`get_top_news`) and shows the top three stories in the order returned, so the first answer after signing is the news. Send that header with every call to the FLASH MCP server. Treat its value like a key: keep it in your agent's configuration and do not post it.
+AI Pro reads the wallet address itself, so there is nothing to type. It needs the Agentic Wallet to be signed in and nothing else: no Developer Mode and no confirmation, because nothing is signed or sent. The same conversation can then keep reading in plain words, for example "Tell me the top economy news from the same FLASH server."
 
-For the next 7 days the same AI Pro conversation can keep reading in plain words, for example "Tell me the top economy news, using the same FLASH lane." It sends the signature to the gate again, so no new signature is needed and Developer Mode can be off.
+With any other MCP client, set the server URL to the address above. A client that can send headers may send `X-Flash-Wallet: <wallet address>` instead of the query string. The skill does this for an agent that runs outside the Binance App.
 
-The skill does the same steps for an agent that runs outside the Binance App.
+**What the address proves.** Nothing about who is calling: a wallet address is public. The pass decides which lane a call takes. It is not a secret and not a login. This is a read-only news service and the same news is on the public lane, so the gate asks the wallet for nothing. A pass claimed just now shows up within a minute.
 
 ## Contract
 
@@ -205,18 +212,19 @@ Compiler: Solidity 0.8.28, optimizer off, default EVM version. Deployed from the
 
 ## Pass gate
 
-`gate/index.mjs` is a small function (AWS Lambda), served at `https://agentic.flash.im/gate`, with one job: hand the lane header to a wallet that has a pass and proves it controls the wallet.
+`gate/index.mjs` is a small function (AWS Lambda, no dependencies). It stands in front of the FLASH MCP server and has one job: choose the lane.
 
-1. `GET ?address=0x...` reads `isActive(address)` from the contract. For a wallet with a pass it returns the EIP-712 message to sign.
-2. `POST {address, expires, signature, signatureRecovery}` checks that the signature was made by that wallet, reads `isActive` again, and returns the header.
+1. `POST https://agentic.flash.im/mcp?wallet=0x...` with an MCP call as the body. The gate reads `isActive(wallet)` from the contract and passes the call on to the MCP server: on the pass lane when the wallet holds a pass, on the public lane otherwise. The MCP server's answer comes back unchanged, with the two `X-Flash-Lane` headers added.
+2. `GET https://agentic.flash.im/gate?address=0x...` answers `{"pass": true}` or `{"pass": false}` for anyone who wants to check a wallet.
+
+The gate keeps a wallet's answer for a short time (five minutes for a pass, thirty seconds for no pass), so a run of calls reads the chain once.
 
 What it does not do:
 
+- It refuses no one. Without a pass the call still goes through, on the public lane.
 - No login, no sessions, no QR codes, no pairing codes. It keeps no record of who asked.
-- It never asks for a seed phrase, a private key, or an API secret.
-- It never asks for a transaction or a token approval. The only thing it asks a wallet for is the signature described above.
-
-An address alone never returns the header.
+- It never asks for a signature, a transaction, a token approval, a seed phrase, a private key, or an API secret.
+- It passes on four request headers (`Content-Type`, `Accept`, `MCP-Protocol-Version`, `User-Agent`) and nothing else. The value that marks a pass-lane call to the MCP server stays inside the gate. It is never returned and never logged.
 
 ## Repository layout
 
@@ -225,7 +233,7 @@ contracts/FlashPass.sol    the pass contract
 abi/FlashPass.abi.json     its ABI
 test/simulate.cjs          19 checks of the contract against live chain state (nothing is sent)
 gate/index.mjs             the pass gate
-gate/test.mjs              27 checks of the gate, with real signatures from throwaway keys
+gate/test.mjs              32 checks of the gate (30 against stand-ins, 2 read the real contract)
 skill/flash-pass/SKILL.md  the skill for agents
 ```
 
@@ -234,7 +242,7 @@ skill/flash-pass/SKILL.md  the skill for agents
 ```
 npm install
 npm run simulate     # contract: 19 checks against BNB Smart Chain state
-npm run test:gate    # gate: 27 checks
+npm run test:gate    # gate: 32 checks
 ```
 
 `simulate` compiles the contract and asks a public node to simulate calls (`eth_simulateV1`) from wallets that really hold an Agent ID. It covers a first claim, a second claim, a wallet without an Agent ID, calls and transfers that carry BNB, unknown functions, and every read function with its expected value. It sends nothing.
@@ -247,7 +255,7 @@ npm run test:gate    # gate: 27 checks
 | No bypassing transaction confirmation | The skill and the prompts above preview first and send only after the user confirms. |
 | No unauthorized asset transfers | The contract cannot receive or move assets. Every call has value 0. |
 | Open source, owner permissions disclosed | Source verified on BscScan. There is no owner. |
-| No collection of sensitive credentials | Nothing is asked for except one signature of the message described above. |
+| No collection of sensitive credentials | Nothing is asked for. The gate takes a wallet address, which is public, and asks for no signature. |
 | No promise of returns | None. The pass has no monetary value. |
 | Agent ID is not a tool to look up other people's wallets by name | No name lookup. The project works from the caller's own wallet. |
 | No unwanted messages | FLASH does not push news. The user's own agent runs the schedule, on the topics and at the times the user chose, and says nothing when nothing is new. A pass holder is never sent news they did not ask for. |

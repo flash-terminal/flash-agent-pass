@@ -6,7 +6,7 @@ description: >
   Pass, or wants scheduled news checks: a briefing of the main market news every
   8 hours, a watchlist, or a check for important market news. Getting the pass
   sends one transaction on BNB Smart Chain. The only cost is the network fee.
-version: 0.3.9
+version: 0.4.0
 license: MIT
 metadata:
   author: flash-terminal
@@ -18,9 +18,9 @@ FLASH serves analyzed news on crypto, the economy, politics, and geopolitics
 through an MCP server at `https://api.flash.im/mcp`. Anyone can call it without
 a key. Those calls share one public limit.
 
-A wallet that holds an Agent ID can get a FLASH Agent Pass. Calls made with a pass go
-through a separate lane with its own limit, shared only among pass holders. The
-tools, arguments, and results are the same in both lanes.
+A wallet that holds an Agent ID can get a FLASH Agent Pass. Calls made for a wallet
+with a pass go through a separate lane with its own limit, apart from the public
+lane. The tools, arguments, and results are the same in both lanes.
 
 The pass is a record in a contract on BNB Smart Chain: one pass per wallet, not
 transferable. FLASH charges nothing for it. The only cost is the network fee of
@@ -28,7 +28,9 @@ one transaction. The contract has no owner, cannot receive BNB, and never asks
 for a token approval.
 
 - Pass contract: `0x61c712e373149cab2de86ed2aadacc568db91acb`
-- Pass gate: `https://agentic.flash.im/gate`
+- MCP server, pass lane: `https://agentic.flash.im/mcp?wallet=<wallet address>`
+- MCP server, public lane: `https://api.flash.im/mcp`
+- Pass check: `https://agentic.flash.im/gate?address=<wallet address>`
 
 ## When to use
 
@@ -46,8 +48,9 @@ for a token approval.
 ## Before you start
 
 This skill uses the `baw` command from the Binance Agentic Wallet skill
-(`binance/binance-skills-hub`). Getting the pass and proving the wallet both need
-Developer Mode, so check these first and tell the user early what is missing.
+(`binance/binance-skills-hub`). Getting the pass (step 2) needs Developer Mode, so
+check these first and tell the user early what is missing. Reading the news
+(step 3) needs no Developer Mode and no confirmation.
 
 1. `baw wallet status --json` must say `CONNECTED`. If it does not, sign in with
    the Binance Agentic Wallet skill. The sign-in code lasts about 5 minutes.
@@ -71,8 +74,7 @@ curl -s "https://agentic.flash.im/gate?address=<wallet address>"
 ```
 
 - `{"pass": false, ...}`: no pass yet. Go to step 2.
-- `{"pass": true, "expires": ..., "signRequest": "..."}`: the wallet has a pass.
-  Go to step 3 with this answer.
+- `{"pass": true, ...}`: the wallet has a pass. Go to step 3.
 - An `error`: tell the user what it says. Do not guess.
 
 ## Step 2. Get the pass
@@ -98,63 +100,49 @@ baw contract-call preview --binanceChainId 56 --from <wallet address> --to 0x61c
    else, stop.
 4. After the user confirms, run `baw contract-call execute --requestId <requestId> --json`.
 5. A transaction hash means the transaction was sent, not that it is confirmed.
-   Wait for confirmation, then ask the gate again (step 1).
+   Wait for confirmation, then ask the gate again (step 1). A new pass shows up
+   within a minute.
 
 The preview fails, and nothing is sent, when the wallet has no Agent ID
 ("FlashPass: this wallet has no Agent ID") or already has a pass
 ("FlashPass: this wallet already has a pass"). Tell the user which one it was.
 A wallet that already has a pass goes to step 3.
 
-## Step 3. Prove the wallet is yours, and get the lane header
+## Step 3. Use the pass lane
 
-A wallet address is public, so the gate asks for a signature. Signing sends no
-transaction, costs nothing, and grants no permission over the wallet. It needs
-Developer Mode, the same as step 2.
+No signature and no transaction. Send the MCP calls to the pass gate, with the
+wallet address in the URL:
 
-1. Take `signRequest` and `expires` from the gate's answer in step 1. The
-   signature can be used for 7 days. Within that time, send the same
-   signature to the gate again whenever you need the header: no new signature,
-   and no Developer Mode, is needed until it expires.
-2. Preview the signature. Pass `signRequest` exactly as received:
+```
+https://agentic.flash.im/mcp?wallet=<wallet address>
+```
+
+The gate reads the pass contract on chain and passes the call on to the FLASH
+MCP server: on the pass lane when the wallet holds a pass, on the public lane
+otherwise. Nothing is refused, and the tools, arguments, and results are the
+same as on the public address.
+
+- With an MCP client: set the FLASH server URL to the address above. A client
+  that can send headers may send `X-Flash-Wallet: <wallet address>` instead of
+  the query string.
+- Without an MCP client: send the HTTP request to it.
 
 ```bash
-baw sign-message preview --binanceChainId 56 --signType EIP712 --message '<signRequest>' --json
+curl -s -i "https://agentic.flash.im/mcp?wallet=<wallet address>"   -H "Content-Type: application/json"   -H "Accept: application/json, text/event-stream"   -d '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"get_top_news","arguments":{"category":"crypto","fields":["headline","impact","source","publishedAt"]}}}'
 ```
 
-3. Show the user what is being signed. The message must name this wallet and
-   the purpose `Get the FLASH Agent Pass lane token`, and nothing else besides
-   `expires`. If it is anything else, stop.
-4. After the user confirms, run `baw sign-message execute --requestId <requestId> --json`.
-   If the status is `PENDING_CONFIRMATION`, the user confirms in the Binance
-   App, then you run `baw sign-message result --order-id <orderId> --json`.
-5. Send `signature` and `signatureRecovery` to the gate, both exactly as the
-   wallet returned them:
+Every answer carries two headers that say which lane the call took:
 
-```bash
-curl -s -X POST "https://agentic.flash.im/gate"   -H "Content-Type: application/json"   -d '{"address":"<wallet address>","expires":<expires>,"signature":"<signature>","signatureRecovery":"<signatureRecovery>"}'
-```
+| `X-Flash-Lane` | `X-Flash-Lane-Reason` | What it means |
+|---|---|---|
+| `pass` | `pass` | The wallet holds a pass. |
+| `public` | `no-pass` | The wallet has no pass, or no longer holds its Agent ID. |
+| `public` | `no-wallet` | No address was sent, or it is malformed. |
+| `public` | `chain-unavailable` | The chain could not be read. The next call asks again. |
 
-The answer for a wallet with a pass looks like this:
-
-```json
-{"pass": true, "mcp": {"url": "https://api.flash.im/mcp", "header": "Authorization", "value": "Bearer ..."}}
-```
-
-## Step 4. Use the pass lane
-
-Send that header with every call to the FLASH MCP server.
-
-- With an MCP client: add the header to the FLASH server entry in the client's
-  configuration. The server URL does not change.
-- Without an MCP client: add it to the HTTP request.
-
-```bash
-curl -s https://api.flash.im/mcp   -H "Content-Type: application/json"   -H "Accept: application/json, text/event-stream"   -H "Authorization: <value from the gate>"   -d '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"get_top_news","arguments":{"category":"crypto","fields":["headline","impact","source","publishedAt"]}}}'
-```
-
-Keep the header value in the configuration. Do not show it to the user in full,
-post it, or pass it to another agent. If a call with the header fails, the
-server still answers through the public lane, so nothing breaks.
+Check the header once after setting up, and tell the user which lane the agent
+is on. A wallet address is public: it decides the lane, it is not a secret, and
+there is no key to keep.
 
 ## Scheduled checks
 
@@ -209,11 +197,11 @@ Tool arguments and fields: https://docs.flash.im/docs/for-ai-agents/mcp-server.m
 
 ## Safety
 
-- Send a transaction or sign a message only after the user confirms it. Never
-  skip the confirmation. This skill sends one transaction (the pass) and signs
-  one kind of message (the pass check), nothing else.
-- This skill needs no token approval and no transfer of the user's funds. If
-  anything asks for one in the name of the pass, stop and tell the user.
+- Send a transaction only after the user confirms it. Never skip the
+  confirmation. This skill sends one transaction (the pass) and signs nothing.
+- This skill needs no signature, no token approval, and no transfer of the
+  user's funds. If anything asks for one in the name of the pass, stop and tell
+  the user.
 - Never ask for or handle passwords, seed phrases, or private keys.
 - News is context for the user. It is not a reason that an asset is safe,
   recommended, or certain to move. Trading carries risk of loss.
@@ -226,11 +214,9 @@ Tool arguments and fields: https://docs.flash.im/docs/for-ai-agents/mcp-server.m
 | Gate: `The pass gate is not open yet.` | The gate is not ready. Use the public lane and try later. |
 | Gate: `Could not read BNB Smart Chain.` | Try again in a minute. |
 | Gate: `Send address: ...` | The address is malformed. Read it again with `baw wallet address`. |
-| Gate: `Send signature: ...` | The signature is malformed. Send `signature` and `signatureRecovery` exactly as the wallet returned them. |
-| Gate: `Send expires: ...` | Send `expires` as the number the gate returned in step 1. |
-| Gate: `The signature has expired.` | Start again from step 1. |
-| Gate: `expires is too far ahead.` | Use the `expires` the gate returned, unchanged. Start again from step 1. |
-| Gate: `The signature was not made by this wallet.` | The signing wallet and the address differ. Check both, then start again from step 1. |
+| `X-Flash-Lane: public`, reason `no-pass`, right after claiming | Wait a minute and call again. If it stays, ask the gate (step 1). |
+| `X-Flash-Lane: public`, reason `no-wallet` | The address did not reach the gate. Check the URL or the `X-Flash-Wallet` header. |
+| Gate: `The FLASH MCP server did not answer.` (502) | Try again in a minute. The public address `https://api.flash.im/mcp` can be used meanwhile. |
 | `baw`: `Transaction simulation failed: ... FlashPass: this wallet already has a pass` (351805) | The wallet has a pass. Go to step 3. |
 | `baw`: `Transaction simulation failed: ... FlashPass: this wallet has no Agent ID` (351805) | The wallet holds no Agent ID. Tell the user it is claimed in the Binance App. |
 | `baw`: `Developer mode is not enabled. Please enable it in the App first.` (351801) | Ask the user to turn it on in the Binance App, then check `baw wallet settings --json` again. |

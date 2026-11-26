@@ -1,8 +1,5 @@
 {
   "name": "flash-pass-gate",
   "private": true,
-  "type": "module",
-  "dependencies": {
-    "ethers": "6.15.0"
-  }
+  "type": "module"
 }

@@ -1,21 +1,27 @@
-// FLASH Agent Pass gate (AWS Lambda, Node.js). One dependency: ethers (signature check).
+// FLASH Agent Pass gate (AWS Lambda, Node.js). No dependencies.
 //
-// Two steps:
-//   1. GET  ?address=0x...                      -> does this wallet have a pass? If yes, returns the
-//                                                  text the wallet must sign.
-//   2. POST {address, expires, signature[, signatureRecovery]}
-//                                               -> checks that the signature was made by that wallet
-//                                                  and that the wallet has a pass, then returns the
-//                                                  MCP lane token.
+// The gate stands in front of the FLASH news MCP server. An agent sends its MCP calls here together
+// with a wallet address. The gate reads the FlashPass contract on BNB Smart Chain:
 //
-// A wallet address alone never returns the token: addresses are public.
+//   wallet holds a pass          -> the call goes on to the MCP server on the pass holders' lane
+//   no pass, no wallet, or the
+//   chain cannot be read         -> the call goes on to the MCP server on the public lane
+//
+// Nothing is refused and the MCP server's answer is returned as it is. The only thing the gate adds
+// is two response headers that say which lane the call took.
+//
+//   POST  ?wallet=0x...   (or header X-Flash-Wallet)   an MCP call (JSON-RPC body), passed through
+//   GET   ?address=0x...                               does this wallet have a pass? {pass: true|false}
+//
+// This is a read-only news service, so the gate does not ask the wallet to prove anything. A wallet
+// address is public: the pass decides which lane a call takes, it is not a secret.
 //
 // Settings (Lambda environment variables):
-//   PASS_CONTRACT   FlashPass contract address on BSC (0x + 40 hex)
-//   MCP_PASS_TOKEN  the lane token the MCP server checks. Secret. Never logged.
-//   BSC_RPC_URLS    optional, comma separated. Defaults to public BSC nodes.
-
-import { verifyTypedData } from 'ethers';
+//   PASS_CONTRACT     FlashPass contract address on BSC (0x + 40 hex)
+//   MCP_PASS_TOKEN    the lane token the MCP server checks. Secret. It never leaves this function
+//                     except in the request to the MCP server. Never logged, never returned.
+//   BSC_RPC_URLS      optional, comma separated. Defaults to public BSC nodes.
+//   MCP_UPSTREAM_URL  optional. Defaults to the production MCP server.
 
 const IS_ACTIVE = '0x9f8a13d7'; // isActive(address)
 const DEFAULT_RPCS = [
@@ -23,49 +29,32 @@ const DEFAULT_RPCS = [
   'https://bsc-rpc.publicnode.com',
   'https://bsc.drpc.org',
 ];
-const MCP_URL = 'https://api.flash.im/mcp';
+const DEFAULT_MCP_URL = 'https://api.flash.im/mcp';
 const ADDRESS = /^0x[0-9a-fA-F]{40}$/;
-const SIGNATURE = /^0x[0-9a-f]{130}$/;
 const RPC_TIMEOUT_MS = 4000;
-const CHAIN_ID = 56;
-/** How long a signature stays usable: 7 days. The pass and the Agent ID are read from the chain again every time it is used. */
-const SIGN_WINDOW_SECONDS = 7 * 24 * 60 * 60;
-const PURPOSE = 'Get the FLASH Agent Pass lane token';
+const UPSTREAM_TIMEOUT_MS = 12000;
+const MAX_BODY_BYTES = 100 * 1024;
 
-const TYPES = {
-  PassCheck: [
-    { name: 'wallet', type: 'address' },
-    { name: 'purpose', type: 'string' },
-    { name: 'expires', type: 'uint256' },
-  ],
+/** How long an answer from the chain is remembered, per wallet. A fresh claim shows up within 30 seconds. */
+const REMEMBER_PASS_MS = 5 * 60 * 1000;
+const REMEMBER_NO_PASS_MS = 30 * 1000;
+const REMEMBER_MAX_WALLETS = 5000;
+const remembered = new Map(); // wallet -> { active, until }
+
+/** Request headers passed on to the MCP server. Authorization is never taken from the caller. */
+const FORWARD_HEADERS = ['content-type', 'accept', 'mcp-protocol-version', 'user-agent'];
+
+const CORS = {
+  'Access-Control-Allow-Origin': '*',
+  'Access-Control-Allow-Methods': 'GET,POST,OPTIONS',
+  'Access-Control-Allow-Headers': 'Content-Type, Accept, MCP-Protocol-Version, X-Flash-Wallet',
+  'Access-Control-Expose-Headers': 'X-Flash-Lane, X-Flash-Lane-Reason',
 };
-const DOMAIN_TYPE = [
-  { name: 'name', type: 'string' },
-  { name: 'version', type: 'string' },
-  { name: 'chainId', type: 'uint256' },
-  { name: 'verifyingContract', type: 'address' },
-];
 
-const json = (statusCode, body) => ({
+const json = (statusCode, body, extra = {}) => ({
   statusCode,
-  headers: {
-    'Content-Type': 'application/json; charset=utf-8',
-    'Cache-Control': 'no-store',
-  },
+  headers: { 'Content-Type': 'application/json', 'Cache-Control': 'no-store', ...CORS, ...extra },
   body: JSON.stringify(body),
-});
-
-const domainFor = (contract) => ({
-  name: 'FLASH Agent Pass',
-  version: '1',
-  chainId: CHAIN_ID,
-  verifyingContract: contract,
-});
-
-const messageFor = (wallet, expires) => ({
-  wallet,
-  purpose: PURPOSE,
-  expires,
 });
 
 /** Asks one node. Returns true/false, or throws if the node did not give a usable answer. */
@@ -106,192 +95,200 @@ export async function hasActivePass(rpcUrls, contract, wallet) {
   return null;
 }
 
-/** True when `signature` over (wallet, purpose, expires) was made by `wallet`. */
-export function signedByWallet(contract, wallet, expires, signature) {
-  try {
-    const signer = verifyTypedData(
-      domainFor(contract),
-      TYPES,
-      messageFor(wallet, expires),
-      signature,
-    );
+/** The same question, remembered for a short time so that a run of calls reads the chain once. */
+async function hasActivePassRemembered(rpcUrls, contract, wallet, now) {
+  const key = `${contract}:${wallet}`;
+  const hit = remembered.get(key);
 
-    return signer.toLowerCase() === wallet.toLowerCase();
-  } catch {
-    return false;
+  if (hit && hit.until > now) {
+    return hit.active;
   }
+
+  const active = await hasActivePass(rpcUrls, contract, wallet);
+
+  // "The chain did not answer" is not remembered: the next call asks again.
+  if (active !== null) {
+    if (remembered.size >= REMEMBER_MAX_WALLETS) {
+      remembered.clear();
+    }
+
+    remembered.set(key, {
+      active,
+      until: now + (active ? REMEMBER_PASS_MS : REMEMBER_NO_PASS_MS),
+    });
+  }
+
+  return active;
 }
 
-/**
- * Accepts the two shapes wallets hand out and returns one: 0x + r + s + v (65 bytes).
- *   - one string of 65 bytes, with or without 0x
- *   - r + s (64 bytes, with or without 0x) plus a separate recovery value ("00"/"01" or "1b"/"1c")
- * Returns undefined when the input is neither.
- */
-export function normalizeSignature(signature, recovery) {
-  if (typeof signature !== 'string') {
-    return undefined;
-  }
+/** For tests. */
+export function forgetAll() {
+  remembered.clear();
+}
 
-  const hex = signature.trim().toLowerCase().replace(/^0x/, '');
+function readSettings() {
+  // Lower case throughout: the same address in mixed case must not change the outcome.
+  const contract = (process.env.PASS_CONTRACT ?? '').trim().toLowerCase();
+  const token = (process.env.MCP_PASS_TOKEN ?? '').trim();
+  const configured = (process.env.BSC_RPC_URLS ?? '')
+    .split(',')
+    .map((url) => url.trim())
+    .filter((url) => url.length > 0);
 
-  if (/^[0-9a-f]{130}$/.test(hex)) {
-    return `0x${hex}`;
-  }
+  return {
+    contract: ADDRESS.test(contract) ? contract : undefined,
+    token: token.length > 0 ? token : undefined,
+    rpcUrls: configured.length > 0 ? configured : DEFAULT_RPCS,
+    upstream: (process.env.MCP_UPSTREAM_URL ?? '').trim() || DEFAULT_MCP_URL,
+  };
+}
 
-  if (/^[0-9a-f]{128}$/.test(hex) && (typeof recovery === 'string' || typeof recovery === 'number')) {
-    const v = String(recovery).trim().toLowerCase().replace(/^0x/, '').padStart(2, '0');
+function lowerCaseHeaders(event) {
+  const headers = {};
 
-    if (['00', '01', '1b', '1c'].includes(v)) {
-      return `0x${hex}${v}`;
+  for (const [name, value] of Object.entries(event?.headers ?? {})) {
+    if (typeof value === 'string') {
+      headers[name.toLowerCase()] = value;
     }
   }
 
-  return undefined;
+  return headers;
 }
 
-function readBody(event) {
-  if (typeof event?.body !== 'string' || event.body.length === 0) {
+function readWallet(event, headers) {
+  const query = event?.queryStringParameters ?? {};
+  const raw = query.wallet ?? query.address ?? headers['x-flash-wallet'];
+
+  if (typeof raw !== 'string') {
     return undefined;
   }
+
+  const wallet = raw.trim().toLowerCase();
+
+  return ADDRESS.test(wallet) ? wallet : undefined;
+}
+
+/** Which lane does this call take, and why. The reason is shown to the caller; the token never is. */
+async function chooseLane(settings, wallet, now) {
+  if (!settings.contract || !settings.token) {
+    return { lane: 'public', reason: 'gate-not-configured' };
+  }
+
+  if (!wallet) {
+    return { lane: 'public', reason: 'no-wallet' };
+  }
+
+  const active = await hasActivePassRemembered(settings.rpcUrls, settings.contract, wallet, now);
+
+  if (active === null) {
+    return { lane: 'public', reason: 'chain-unavailable' };
+  }
+
+  return active ? { lane: 'pass', reason: 'pass' } : { lane: 'public', reason: 'no-pass' };
+}
+
+/** Sends the MCP call on and returns the MCP server's answer as it is. */
+async function passThrough(event, headers, settings, choice) {
+  const laneHeaders = { 'X-Flash-Lane': choice.lane, 'X-Flash-Lane-Reason': choice.reason };
+  const body =
+    typeof event?.body === 'string'
+      ? event.isBase64Encoded
+        ? Buffer.from(event.body, 'base64').toString('utf8')
+        : event.body
+      : '';
+
+  if (Buffer.byteLength(body, 'utf8') > MAX_BODY_BYTES) {
+    return json(413, { error: 'The request body is too large.' }, laneHeaders);
+  }
+
+  const outgoing = {};
+
+  for (const name of FORWARD_HEADERS) {
+    if (headers[name]) {
+      outgoing[name] = headers[name];
+    }
+  }
+
+  if (choice.lane === 'pass') {
+    outgoing.authorization = `Bearer ${settings.token}`;
+  }
+
+  let response;
+  let text;
 
   try {
-    const raw = event.isBase64Encoded
-      ? Buffer.from(event.body, 'base64').toString('utf8')
-      : event.body;
-    const parsed = JSON.parse(raw);
-
-    return typeof parsed === 'object' && parsed !== null ? parsed : undefined;
+    response = await fetch(settings.upstream, {
+      method: 'POST',
+      headers: outgoing,
+      body,
+      redirect: 'manual',
+      signal: AbortSignal.timeout(UPSTREAM_TIMEOUT_MS),
+    });
+    text = await response.text();
   } catch {
-    return undefined;
+    return json(502, { error: 'The FLASH MCP server did not answer. Try again in a minute.' }, laneHeaders);
   }
+
+  // A redirect would carry the lane token somewhere else. It is not followed.
+  if (response.status >= 300 && response.status < 400) {
+    return json(502, { error: 'The FLASH MCP server did not answer. Try again in a minute.' }, laneHeaders);
+  }
+
+  return {
+    statusCode: response.status,
+    headers: {
+      'Content-Type': response.headers.get('content-type') ?? 'application/json',
+      'Cache-Control': 'no-store',
+      ...CORS,
+      ...laneHeaders,
+    },
+    body: text,
+  };
 }
-
-const NO_PASS = (contract) =>
-  json(200, {
-    pass: false,
-    message:
-      'This wallet has no FLASH Agent Pass, or no longer holds an Agent ID. Claim the pass first.',
-    contract,
-  });
-
-const CHAIN_DOWN = () =>
-  json(503, { error: 'Could not read BNB Smart Chain. Try again in a minute.' });
 
 export async function handler(event) {
   const method = event?.requestContext?.http?.method ?? 'GET';
+
+  if (method === 'OPTIONS') {
+    return { statusCode: 204, headers: { ...CORS }, body: '' };
+  }
 
   if (method !== 'GET' && method !== 'POST') {
     return json(405, { error: 'Use GET or POST.' });
   }
 
-  // Lower case throughout: the same address in mixed case must not change the outcome.
-  const contract = (process.env.PASS_CONTRACT ?? '').trim().toLowerCase();
-  const token = (process.env.MCP_PASS_TOKEN ?? '').trim();
+  const settings = readSettings();
+  const headers = lowerCaseHeaders(event);
+  const wallet = readWallet(event, headers);
+  const now = Date.now();
 
-  if (!ADDRESS.test(contract) || token.length === 0) {
+  // An MCP call: choose the lane and pass it on.
+  if (method === 'POST') {
+    return passThrough(event, headers, settings, await chooseLane(settings, wallet, now));
+  }
+
+  // A plain question: does this wallet have a pass?
+  if (!settings.contract) {
     return json(503, { error: 'The pass gate is not open yet.' });
   }
 
-  const configured = (process.env.BSC_RPC_URLS ?? '')
-    .split(',')
-    .map((url) => url.trim())
-    .filter((url) => url.length > 0);
-  const rpcUrls = configured.length > 0 ? configured : DEFAULT_RPCS;
-  const now = Math.floor(Date.now() / 1000);
-
-  // Step 1: is there a pass, and what should the wallet sign?
-  if (method === 'GET') {
-    const address = event?.queryStringParameters?.address?.trim().toLowerCase();
-
-    if (typeof address !== 'string' || !ADDRESS.test(address)) {
-      return json(400, {
-        error: 'Send address: a wallet address, 0x followed by 40 hex characters.',
-      });
-    }
-
-    const active = await hasActivePass(rpcUrls, contract, address);
-
-    if (active === null) {
-      return CHAIN_DOWN();
-    }
-
-    if (!active) {
-      return NO_PASS(contract);
-    }
-
-    const expires = now + SIGN_WINDOW_SECONDS;
-    const typedData = {
-      domain: domainFor(contract),
-      primaryType: 'PassCheck',
-      types: { EIP712Domain: DOMAIN_TYPE, ...TYPES },
-      message: messageFor(address, expires),
-    };
-
-    return json(200, {
-      pass: true,
-      next: 'Sign the request below with this wallet, then POST {address, expires, signature} to this URL. If the wallet returns signatureRecovery apart from signature, send it too.',
-      expires,
-      // The exact string a wallet command line takes for an EIP-712 signature.
-      signRequest: JSON.stringify({
-        method: 'eth_signTypedData_v4',
-        params: [address, JSON.stringify(typedData)],
-      }),
-    });
-  }
-
-  // Step 2: the signature proves the caller controls the wallet.
-  const body = readBody(event);
-  const address =
-    typeof body?.address === 'string' ? body.address.trim().toLowerCase() : undefined;
-  const signature = normalizeSignature(body?.signature, body?.signatureRecovery);
-  const expires = Number(body?.expires);
-
-  if (address === undefined || !ADDRESS.test(address)) {
+  if (!wallet) {
     return json(400, {
       error: 'Send address: a wallet address, 0x followed by 40 hex characters.',
     });
   }
 
-  if (signature === undefined || !SIGNATURE.test(signature)) {
-    return json(400, {
-      error:
-        'Send signature: 65 bytes as hex, or 64 bytes as hex together with signatureRecovery.',
-    });
-  }
-
-  if (!Number.isSafeInteger(expires)) {
-    return json(400, { error: 'Send expires: the number returned with the sign request.' });
-  }
-
-  if (expires < now) {
-    return json(401, { error: 'The signature has expired. Start again with GET.' });
-  }
-
-  if (expires > now + SIGN_WINDOW_SECONDS) {
-    return json(400, { error: 'expires is too far ahead. Start again with GET.' });
-  }
-
-  if (!signedByWallet(contract, address, expires, signature)) {
-    return json(401, { error: 'The signature was not made by this wallet.' });
-  }
-
-  const active = await hasActivePass(rpcUrls, contract, address);
+  const active = await hasActivePass(settings.rpcUrls, settings.contract, wallet);
 
   if (active === null) {
-    return CHAIN_DOWN();
-  }
-
-  if (!active) {
-    return NO_PASS(contract);
+    return json(503, { error: 'Could not read BNB Smart Chain. Try again in a minute.' });
   }
 
   return json(200, {
-    pass: true,
-    mcp: {
-      url: MCP_URL,
-      header: 'Authorization',
-      value: `Bearer ${token}`,
-    },
+    pass: active,
+    contract: settings.contract,
+    message: active
+      ? 'This wallet holds a FLASH Agent Pass. Send MCP calls to this gate with ?wallet=<address> to read on the pass holders\' lane.'
+      : 'This wallet has no FLASH Agent Pass, or no longer holds an Agent ID. Claim the pass first. Until then its calls take the public lane.',
   });
 }
