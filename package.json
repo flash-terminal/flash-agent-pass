@@ -1,0 +1,12 @@
+{
+  "name": "flash-pass",
+  "private": true,
+  "license": "MIT",
+  "scripts": {
+    "simulate": "node test/simulate.cjs",
+    "test:gate": "cd gate && npm install && node test.mjs"
+  },
+  "devDependencies": {
+    "solc": "0.8.28"
+  }
+}
