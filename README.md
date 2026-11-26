@@ -18,7 +18,7 @@ An Agent ID (`name.ai`) is the on-chain identity of a Binance Agentic Wallet. FL
 
 - **A use for Agent ID outside the chain.** The identity is not a badge here. It decides which lane an agent's calls travel in, on a news service that is already in production.
 - **Better service for identified agents.** One Agent ID per user, not transferable, means passes cannot be multiplied with throwaway wallets. The pass lane has its own key and its own limit, apart from the public lane, so the public lane's traffic does not use it up.
-- **News for the prediction markets agents trade.** An agent sends a Polymarket or Kalshi contract and gets the stories that bear on that question, each marked by how directly. In FLASH's measurement this answered more contracts, with fewer unrelated stories, than Google's search engine set over the same stories (table below).
+- **News for the prediction markets agents trade.** An agent sends the question of a Polymarket or Kalshi contract and gets the stories that bear on it, each marked by how directly. In FLASH's measurement this answered more contracts, with fewer unrelated stories, than Google's search engine set over the same stories (table below).
 - **Cheaper, faster, repeatable answers for agents in the ecosystem.** In FLASH's own measurement, an agent answered "what matters today" about 12 times cheaper and 13 times faster with one FLASH call than with web search, and gave the same answer each time (table below).
 - **News in the user's own language, in 16 languages.** Every story is served already translated, with the same values in every language. An agent whose user reads Korean, Turkish, or Vietnamese passes the story on as it arrives and spends no tokens translating it.
 - **A reason to run an agent every day.** News is a daily need. The pass lane is tuned for scheduled work, which is the kind of work that keeps an Agentic Wallet's agent in use.
@@ -32,7 +32,7 @@ A limit of its own is what turns a news tool into a monitoring system. With the 
 |---|---|---|
 | **Breaking-news alert.** Tell the user when a top-tier story lands. | `get_latest_news` with `impact: [5]` since the last check | every 10 to 15 minutes |
 | **Portfolio watch.** Follow everything the user holds or tracks. | `find_news` with up to 30 names and tickers in one call, `impact: [4, 5]` | every 10 to 15 minutes |
-| **Prediction market monitor.** Follow the news behind every contract the user holds. | `find_news` with the contract's question, or its Polymarket or Kalshi number, keeping stories marked `direct` | every 10 to 15 minutes |
+| **Prediction market monitor.** Follow the news behind every contract the user holds. | `find_news` with the contract's question as `sentence`, keeping stories marked `direct` | every 10 to 15 minutes |
 | **Scheduled briefings.** The market's main stories, three times a day. | `get_top_news` per category, ten minutes past the hour | every 8 hours, or at the times the user chose |
 | **Event triggers.** React to one kind of event, such as a regulatory action. | filter by `eventType` | with every check |
 | **Sentiment tracking.** Watch how the news on one entity turns over days. | read each entity's own sentiment across stories | with every check |
@@ -70,7 +70,7 @@ For an agent that checks the news many times a day, this difference is paid on e
 
 A prediction market contract is a question, and the news that moves it rarely repeats the question's words. "Will the Fed cut rates in December?" is moved by a jobs report, a governor's speech, and an inflation print, none of which mention the contract. Keyword search misses them, and a search by meaning brings back whatever sounds similar.
 
-FLASH covers the contracts on Polymarket and Kalshi where the volume is. An agent sends the contract's question as written, or the contract's number, and gets the stories that bear on it, each one marked:
+FLASH covers the contracts on Polymarket and Kalshi where the volume is. An agent sends the contract's question as written and gets the stories that bear on it, each one marked:
 
 | `relation` | What it means |
 |---|---|
