@@ -141,8 +141,8 @@ Every answer carries two headers that say which lane the call took:
 | `public` | `chain-unavailable` | The chain could not be read. The next call asks again. |
 
 Check the header once after setting up, and tell the user which lane the agent
-is on. A wallet address is public: it decides the lane, it is not a secret, and
-there is no key to keep.
+is on. There is no key to keep: the wallet address, which is already public on
+chain, is all the gate needs.
 
 ## Scheduled checks
 

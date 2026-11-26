@@ -186,7 +186,17 @@ AI Pro reads the wallet address itself, so there is nothing to type. It needs th
 
 With any other MCP client, set the server URL to the address above. A client that can send headers may send `X-Flash-Wallet: <wallet address>` instead of the query string. The skill does this for an agent that runs outside the Binance App.
 
-**What the address proves.** Nothing about who is calling: a wallet address is public. The pass decides which lane a call takes. It is not a secret and not a login. This is a read-only news service and the same news is on the public lane, so the gate asks the wallet for nothing. A pass claimed just now shows up within a minute.
+A pass claimed just now shows up within a minute.
+
+## Why the gate asks for an address and nothing else
+
+Reading the news should not cost a signature. A wallet signature is the most sensitive thing an agent can do for its user, and a service that asks for one in exchange for news teaches agents to sign for third parties. That habit is what phishing depends on.
+
+So the gate asks for one thing: a wallet address. An address is already public on chain, so giving it carries no risk, and the user does not even type it. The agent reads its own wallet address and sends it with the call. Nothing else is asked for: no signature, no transaction, no approval, no login.
+
+The check itself happens on chain. The gate reads the pass contract on BNB Smart Chain, the contract checks the Agent ID, and the gate reads again while the pass is in use, so a wallet that gives up its Agent ID leaves the pass lane.
+
+The first version of this project asked for more. It had the wallet sign a message, returned a header value, and had the agent carry that value to another server. We removed all of it: for a read-only news service it asked users for more authority than the job needs. What a user is asked for should be plain to see and safe to give.
 
 ## Contract
 
@@ -255,7 +265,7 @@ npm run test:gate    # gate: 32 checks
 | No bypassing transaction confirmation | The skill and the prompts above preview first and send only after the user confirms. |
 | No unauthorized asset transfers | The contract cannot receive or move assets. Every call has value 0. |
 | Open source, owner permissions disclosed | Source verified on BscScan. There is no owner. |
-| No collection of sensitive credentials | Nothing is asked for. The gate takes a wallet address, which is public, and asks for no signature. |
+| No collection of sensitive credentials | Nothing sensitive is asked for. The gate takes only a wallet address, which is already public on chain, and asks for no signature. |
 | No promise of returns | None. The pass has no monetary value. |
 | Agent ID is not a tool to look up other people's wallets by name | No name lookup. The project works from the caller's own wallet. |
 | No unwanted messages | FLASH does not push news. The user's own agent runs the schedule, on the topics and at the times the user chose, and says nothing when nothing is new. A pass holder is never sent news they did not ask for. |
