@@ -1,8 +1,8 @@
 # FLASH Agent Pass
 
-**Holding an Agent ID opens a tier of a production news service: a lane of the FLASH MCP server reserved for Agent ID holders.**
+**Holding an Agent ID opens a tier of a production news service: a dedicated lane on the FLASH MCP server for Agent ID holders.**
 
-An Agent ID (`name.ai`) is the on-chain identity of a Binance Agentic Wallet. FLASH Agent Pass turns that identity into access: a wallet that holds an Agent ID claims a pass once, and its agent then reads FLASH news through a lane with its own key and its own limit, apart from the public lane that every other caller shares. The lane is built for the work agents do best: checking on a schedule, many times a day, without waiting behind everyone else.
+FLASH Agent Pass is the part of FLASH AI that is built around Agent ID. An Agent ID (`name.ai`) is the on-chain identity of a Binance Agentic Wallet, and the pass turns that identity into access: a wallet that holds an Agent ID claims a pass once, and its agent then reads FLASH news through a lane with its own key and its own limit, apart from the public lane that every other caller shares. The lane is built for the work agents do best: checking on a schedule, many times a day, without waiting behind everyone else.
 
 | | |
 |---|---|
@@ -97,7 +97,7 @@ For an agent that holds positions on several contracts, this is the job the pass
 
 ## FLASH
 
-FLASH is news intelligence infrastructure for institutions and AI agents. It reads reporting from 50 sources on crypto, the economy, politics, and geopolitics, writes each story in its own words, and analyzes it once by one standard before serving it. It handles about 10,000 stories a week and delivers them as about 160,000 stories across 16 languages.
+FLASH AI, called FLASH in this document, is news intelligence infrastructure for institutions and AI agents. It reads reporting from 50 sources on crypto, the economy, politics, and geopolitics, writes each story in its own words, and analyzes it once by one standard before serving it. It handles about 10,000 stories a week and delivers them as about 160,000 stories across 16 languages.
 
 **Binance, CryptoRank, and KuCoin use FLASH data.**
 
@@ -135,7 +135,7 @@ An agent that translates each story itself pays for it in tokens on every story 
 - Website: https://flash.im
 - Terminal: https://app.flash.im/terminal shows the same news live, with its structured fields.
 - Documentation: https://docs.flash.im
-- MCP server: `https://api.flash.im/mcp`, live since 12 October 2026. It answers without a pass and without a key, so anyone can check the quality of the news before claiming a pass.
+- MCP server: `https://api.flash.im/mcp`, live since 12 October 2026. It gives an agent 5 tools (`get_top_news`, `get_latest_news`, `find_news`, `get_news_cover`, `get_calendar`) and answers without a pass and without a key, so anyone can check the quality of the news before claiming a pass.
 
 ## How Agent ID is used
 
@@ -189,6 +189,8 @@ With any other MCP client, set the server URL to the address above. A client tha
 A pass claimed just now shows up within a minute.
 
 ## Why the gate asks for an address and nothing else
+
+The only thing asked of the user is a public wallet address. No signature, no approval, and no login are needed at any step. This is a deliberate design that puts security first through simplicity and transparency on chain.
 
 Reading the news should not cost a signature. A wallet signature is the most sensitive thing an agent can do for its user, and a service that asks for one in exchange for news teaches agents to sign for third parties. That habit is what phishing depends on.
 
